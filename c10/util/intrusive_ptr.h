@@ -175,7 +175,27 @@ class intrusive_ptr final {
     public:
         using element_type = TTarget;
 
-        explicit intrusive_ptr(TTarget *target, raw::DontIncreaseRefCount) noexcept : target_(target) {}; // won't increase ref count for you
+        // Constructor + implicit constructor
+        intrusive_ptr() noexcept : intrusive_ptr(NullType::singleton(), raw::DontIncreaseRefCount{}) {}
+
+        intrusive_ptr(std::nullptr_t) noexcept : intrusive_ptr(NullType::singleton(), raw::DontIncreaseRefCount{}) {}
+
+        // BASE constructor
+        explicit intrusive_ptr(TTarget *target, raw::DontIncreaseRefCount) noexcept : target_(target) {} // won't increase ref count for you
+
+        // Release ownership of the unique ptr and then initialize the pointer
+        explicit intrusive_ptr(std::unique_ptr<TTarget> rhs) noexcept : intrusive_ptr(rhs.release()) {}
+
+        // steal resources
+        intrusive_ptr(intrusive_ptr&& rhs) noexcept : target_(rhs.target_) {
+            rhs.target_ = NullType::singleton();
+        }
+
+        // there's many other constructors here
+
+        ~intrusive_ptr() noexcept {
+            reset_();
+        }
 };
 
 } // namespace intrusive_ptr
