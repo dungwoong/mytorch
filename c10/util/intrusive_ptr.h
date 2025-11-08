@@ -13,10 +13,15 @@ class class_;
 namespace c10 {
 class intrusive_ptr_target;
 namespace raw {
+struct DontIncreaseRefCount {};
+} // namespace raw
 namespace intrusive_ptr {
 
 namespace detail {
 // TODO look line 30, they have some constants stored here
+constexpr uint64_t kReferenceCountOne = 1; // to increment the reference count by 1
+constexpr uint64_t kWeakReferenceCountOne = (kReferenceCountOne << 32);
+constexpr uint64_t kUniqueRef = (kReferenceCountOne | kWeakReferenceCountOne); // one strong ref, strong refs add a weak ref
 
 // Default NullType for pointer, for specialized cases
 template <class TTarget>
@@ -35,9 +40,32 @@ inline uint32_t weakcount(uint64_t combined_refcount) {
   return static_cast<uint32_t>(combined_refcount >> 32);
 }
 
+inline uint64_t combined_refcount_incrememt(std::atomic<uint64_t>& combined_refcount, uint64_t inc) {
+    return combined_refcount.fetch_add(inc, std::memory_order_relaxed) + inc;
+}
+
+inline uint64_t combined_refcount_decrement(std::atomic<uint64_t>& combined_refcount, uint64_t dec) {
+    // decrementing may lead to destroying the object, we need prevent reordering accesses around this
+    return combined_refcount.fetch_sub(dec, std::memory_order_acq_rel) - dec;
+}
+
+inline uint32_t atomic_refcount_increment(std::atomic<uint64_t>& combined_refcount) {
+    return detail::refcount(combined_refcount_incrememt(combined_refcount, kReferenceCountOne));
+}
+
+inline uint32_t atomic_weakcount_increment(std::atomic<uint64_t>& combined_refcount) {
+    return detail::weakcount(combined_refcount_incrememt(combined_refcount, kWeakReferenceCountOne));
+}
+
+inline uint32_t atomic_weakcount_decrement(std::atomic<uint64_t>& combined_refcount) {
+    return detail::weakcount(combined_refcount_decrement(combined_refcount, kWeakReferenceCountOne));
+}
+
 } // namespace detail
 
 // TODO define import/export macros, figure out what those do
+
+// So e.g. how you have a shared_ptr<T>, we will have an intrusive_ptr<T>
 class intrusive_ptr_target{
     mutable std::atomic<uint64_t> combined_refcount_;
     static_assert(sizeof(std::atomic<uint64_t>) == 8);
@@ -85,10 +113,70 @@ using weak_intrusive_ptr_target = intrusive_ptr_target; // to help distinguish
 
 // TODO still not sure when you use the weak target or pointer
 
+template <class TTarget, class NullType>
+class weak_intrusive_ptr; // declare here so we can reference ahead
+
+/**
+ * Intrusive ptr stores the count inside the object itself(target)
+ * so less indirection so more efficiency
+ */
 template <class TTarget, class NullType=detail::intrusive_target_default_null_type<TTarget>>
-struct intrusive_ptr final { 
+class intrusive_ptr final { 
+    private:
+        TTarget* target_;
+
+        template <class TT2, class NT2>
+        friend class intrusive_ptr;
+        friend class weak_intrusive_ptr<TTarget, NullType>;
+
+        // Require for pybind https://pybind11.readthedocs.io/en/stable/advanced/smart_ptrs.html#custom-smart-pointers
+        template <typename, typename...>
+        friend class pybind11::class_;
+
+        void retain_() {
+            if (target_ != NullType::singleton()) {
+                detail::atomic_refcount_increment(target_->combined_refcount_);
+            }
+        }
+
+        void reset_() {
+            if (target_ != NullType::singleton()) {
+                if (target_->combined_refcount_.load(std::memory_order_acquire) == detail::kUniqueRef) {
+                    // No weak references and we're releasing the last strong reference
+                    // No other references to this thing, so we can safely destroy it and return
+                    target_->combined_refcount.store(0, std::memory_order_relaxed);
+                    delete target_; // automatically releases resources
+                    return;
+                }
+
+                auto combined_refcount = detail::combined_refcount_decrement(target_->combined_refcount_, detail::kReferenceCountOne);
+                if (detail::refcount(combined_refcount) == 0) {
+                    // no more strong refs, release the resources to start
+                    bool should_delete = (combined_refcount == detail::kWeakReferenceCountOne); // this was the last strong ref
+                    if (!should_delete) {
+                        // remove_const_t removes const from the type, const_cast removes it from the var
+                        const_cast<std::remove_const_t<TTarget>*>(target_)->release_resources();
+                        should_delete = detail::atomic_weakcount_decrement(target_->combined_refcount_) == 0; // another thread may concurrently decrement the count
+                    }
+                    if (should_delete) {
+                        delete target_;
+                    }
+                }
+            }
+        }
+
+        // Private constructor. Explicit means don't use it for implicit conversions e.g. int x = 5 then x+4.0f
+        explicit intrusive_ptr(TTarget* target) : intrusive_ptr(target, raw::DontIncreaseRefCount{}) {
+            if (target_ != NullType::singleton()) {
+                target->combined_refcount_.store(detail::kUniqueRef, std::memory_order_relaxed); // initialize with 1 weak and 1 strong ref since strong>0 --> weak>0
+            }
+        }
+
+    public:
+        using element_type = TTarget;
+
+        explicit intrusive_ptr(TTarget *target, raw::DontIncreaseRefCount) noexcept : target_(target) {}; // won't increase ref count for you
 };
 
 } // namespace intrusive_ptr
-} // namespace raw
 } // namespace c10
