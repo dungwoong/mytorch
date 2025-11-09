@@ -85,7 +85,7 @@ class IntrusivePtr {
             return *this;
         }
 
-        // IN the other operator=, we call IntrusivePtr tmp = rhs which invokes this
+        // IN the other operator=, we call IntrusivePtr tmp = rhs which invokes the copy constructor
         IntrusivePtr& operator=(IntrusivePtr& rhs) & noexcept {
             return this->template operator=<T>(rhs);
         }
@@ -95,7 +95,7 @@ class IntrusivePtr {
         IntrusivePtr& operator=(const IntrusivePtr<T2>& rhs) & noexcept {
             std::cout << "= with copy semantics called" << std::endl;
             static_assert(std::is_convertible_v<T2*, T*>, "type mismatch");
-            IntrusivePtr tmp = rhs; // make a copy
+            IntrusivePtr tmp = rhs; // will call the copy constructor
             swap(tmp); // tmp deconstructor will call after this function
             return *this;
         }

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <type_traits>
+#include <iostream>
 
 // Use this as a friend class later
 namespace pybind11 {
@@ -144,7 +145,7 @@ class intrusive_ptr final {
                 if (target_->combined_refcount_.load(std::memory_order_acquire) == detail::kUniqueRef) {
                     // No weak references and we're releasing the last strong reference
                     // No other references to this thing, so we can safely destroy it and return
-                    target_->combined_refcount.store(0, std::memory_order_relaxed);
+                    target_->combined_refcount_.store(0, std::memory_order_relaxed);
                     delete target_; // automatically releases resources
                     return;
                 }
@@ -186,6 +187,10 @@ class intrusive_ptr final {
         // Release ownership of the unique ptr and then initialize the pointer
         explicit intrusive_ptr(std::unique_ptr<TTarget> rhs) noexcept : intrusive_ptr(rhs.release()) {}
 
+        intrusive_ptr(intrusive_ptr& rhs) noexcept : target_(rhs.target_) {
+            retain_();
+        }
+
         // steal resources
         intrusive_ptr(intrusive_ptr&& rhs) noexcept : target_(rhs.target_) {
             rhs.target_ = NullType::singleton();
@@ -196,7 +201,44 @@ class intrusive_ptr final {
         ~intrusive_ptr() noexcept {
             reset_();
         }
+
+        // Copy =
+        intrusive_ptr& operator=(const intrusive_ptr& rhs) & noexcept {
+            return this->template operator=<TTarget>(rhs);
+        }
+
+        template <typename T2>
+        intrusive_ptr& operator=(intrusive_ptr<T2>& rhs) & noexcept {
+            static_assert(std::is_convertible_v<T2*, TTarget*>, "Invalid conversion");
+            intrusive_ptr tmp = rhs; // copy constructor
+            swap(tmp); // so we're holding the RHS thing
+            return *this;
+            // tmp will destruct now, calling reset() on whatever we had before
+        }
+
+        // Compiler does reference collapsing so T& && --> T&, T&& & --> T&&
+        template <class ...Args>
+        static intrusive_ptr make(Args&&... args) {
+            return intrusive_ptr(new TTarget(std::forward<Args>(args)...));
+        }
+
+        TTarget* get() const noexcept {
+            return target_;
+        }
+
+        void swap(intrusive_ptr rhs) {
+            std::swap(target_, rhs.target_);
+        }
+
+        void getStrong() const {
+            std::cout << target_->refcount() << std::endl;
+        }
 };
+
+template <class TTarget, class NullType = detail::intrusive_target_default_null_type<TTarget>, class... Args>
+inline intrusive_ptr<TTarget, NullType> make_intrusive(Args&&... args) {
+    return intrusive_ptr<TTarget, NullType>::make(std::forward<Args>(args)...); // forwarding so no unnecessary move
+}
 
 } // namespace intrusive_ptr
 } // namespace c10
